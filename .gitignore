@@ -1,0 +1,5 @@
+# yerel araçlar ve ekran görüntüleri
+.tools/
+*.png
+server.log
+server.pid
