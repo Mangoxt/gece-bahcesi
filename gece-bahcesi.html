@@ -7280,6 +7280,9 @@ function bootAudio() {
 function handleKey(event) {
   const raw = event.key;
   const key = raw.length === 1 ? raw.toLowerCase() : raw;
+  // yazı alanlarına yazarken oyun tuşlarını çalma
+  const tag = event.target && event.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
   if (G.scene === 'gameover' || G.scene === 'ending') return;
 
@@ -7480,6 +7483,1101 @@ function boot() {
 }
 
 boot();
+/* Çok oyunculu katman — oda, varlık, sohbet, ortak savaş */
+const MP = {
+  open: false,
+  mode: 'local',
+  room: '',
+  name: '',
+  connected: false,
+  peers: new Map(),
+  chat: [],
+  channel: null,
+  socket: null,
+  id: 'p' + Math.random().toString(36).slice(2, 8),
+  lastSend: 0,
+  shareBattle: true,
+  unread: 0,
+  relayUrl: ''
+};
+
+const mpStyle = `
+.mp-fab{position:fixed;right:max(.75rem,env(safe-area-inset-right));bottom:calc(9rem + env(safe-area-inset-bottom));z-index:12;display:flex;align-items:center;gap:.4rem;padding:.5rem .8rem;font-family:var(--serif);font-size:.78rem;letter-spacing:.05em;color:var(--ink);background:rgba(8,20,22,.82);border:1px solid var(--gold-dim);border-radius:999px;box-shadow:0 18px 40px -26px #000;cursor:pointer;touch-action:manipulation}
+.mp-fab.ing{border-color:rgba(159,230,164,.55)}
+.mp-fab .dot{width:.4rem;height:.4rem;border-radius:50%;background:#9fe6a4;box-shadow:0 0 8px #9fe6a4}
+.mp-modal{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:.8rem;background:rgba(2,7,9,.74);backdrop-filter:blur(6px)}
+.mp-modal[hidden]{display:none}
+.mp-sheet{width:min(30rem,100%);max-height:min(88dvh,42rem);display:flex;flex-direction:column;gap:.65rem;padding:1.05rem 1.1rem 1.15rem;background:linear-gradient(180deg,rgba(12,26,28,.98),rgba(6,14,17,.98));border:1px solid var(--gold-dim);border-radius:8px;box-shadow:0 40px 90px -40px #000;overflow-y:auto;color:var(--ink);font-family:var(--sans);font-size:.9rem}
+.mp-head{display:flex;align-items:flex-start;justify-content:space-between;gap:.6rem}
+.mp-head h2{margin:.1rem 0 .2rem;font-family:var(--serif);font-size:1.3rem;font-weight:500}
+.mp-head p{margin:0;font-size:.76rem;color:rgba(220,232,226,.62);line-height:1.5}
+.mp-x{flex:0 0 auto;width:2rem;height:2rem;border-radius:50%;background:rgba(255,255,255,.05);border:1px solid rgba(233,207,155,.22);color:var(--ink);cursor:pointer}
+.mp-row{display:flex;gap:.45rem;align-items:center}
+.mp-field{flex:1;min-width:0;display:flex;flex-direction:column;gap:.22rem;font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:rgba(220,232,226,.55)}
+.mp-field input,.mp-field select{width:100%;padding:.5rem .6rem;font-family:var(--sans);font-size:.9rem;color:var(--ink);background:rgba(255,255,255,.045);border:1px solid rgba(233,207,155,.2);border-radius:5px;letter-spacing:0}
+.mp-btn{padding:.55rem .9rem;font-family:var(--sans);font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:#0a1416;background:linear-gradient(180deg,#f2ddae,#d9b97f);border:0;border-radius:5px;cursor:pointer;touch-action:manipulation}
+.mp-btn:disabled{opacity:.45;cursor:default}
+.mp-btn.ghost{background:transparent;color:var(--ink);border:1px solid rgba(233,207,155,.28)}
+.mp-code{margin:0;padding:.55rem .7rem;font-size:.8rem;letter-spacing:.06em;color:#9fe6a4;background:rgba(159,230,164,.08);border:1px dashed rgba(159,230,164,.35);border-radius:5px;word-break:break-all}
+.mp-list{display:flex;flex-direction:column;gap:.35rem}
+.mp-person{display:flex;align-items:center;gap:.5rem;padding:.45rem .55rem;background:rgba(255,255,255,.03);border:1px solid rgba(233,207,155,.12);border-radius:5px;font-size:.84rem}
+.mp-person i{width:1.7rem;height:1.7rem;border-radius:50%;display:grid;place-items:center;font-style:normal;font-size:.75rem;background:rgba(127,227,212,.16);color:#7fe3d4}
+.mp-person span.tag{margin-left:auto;font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;color:rgba(220,232,226,.5)}
+.mp-chat{height:9rem;overflow-y:auto;display:flex;flex-direction:column;gap:.3rem;padding:.5rem;background:rgba(0,0,0,.28);border-radius:5px;font-size:.8rem;line-height:1.45}
+.mp-chat p{margin:0;color:rgba(232,240,236,.86)}
+.mp-chat b{color:#e9cf9b;font-weight:600}
+.mp-chat .sys{color:#9fe6a4;font-style:italic}
+.mp-note{margin:0;font-size:.68rem;color:rgba(220,232,226,.45);line-height:1.5}
+.mp-emoji{display:flex;gap:.3rem;flex-wrap:wrap}
+.mp-emoji button{padding:.3rem .45rem;background:rgba(255,255,255,.05);border:1px solid rgba(233,207,155,.18);border-radius:4px;cursor:pointer;font-size:.9rem}
+`;
+
+function injectMpUI() {
+  if (document.getElementById('mp-style')) return;
+  const style = document.createElement('style');
+  style.id = 'mp-style';
+  style.textContent = mpStyle;
+  document.head.appendChild(style);
+
+  const fab = document.createElement('button');
+  fab.id = 'mp-fab';
+  fab.className = 'mp-fab';
+  fab.innerHTML = '<span class="dot"></span><span id="mp-fab-text">Ortak Yol</span><b id="mp-fab-count"></b>';
+  fab.addEventListener('click', () => openLobby());
+  document.body.appendChild(fab);
+
+  const modal = document.createElement('div');
+  modal.id = 'mp-modal';
+  modal.className = 'mp-modal';
+  modal.hidden = true;
+  modal.innerHTML = `<div class="mp-sheet" role="dialog" aria-modal="true" aria-label="Ortak Yol">
+    <div class="mp-head">
+      <div>
+        <p class="kicker tiny">Ortak Yol</p>
+        <h2>Bahçeyi birlikte yürüyün</h2>
+        <p>Bir oda aç, kodu arkadaşına ver. Aynı cihazda ikinci sekme ya da kendi aktarıcı sunucunla internet üzerinden oynayın.</p>
+      </div>
+      <button class="mp-x" id="mp-close" aria-label="Kapat">✕</button>
+    </div>
+    <div id="mp-body"></div>
+  </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) closeLobby();
+  });
+  document.getElementById('mp-close').addEventListener('click', closeLobby);
+  renderLobby();
+}
+function mpSafeName(input) {
+  return String(input || '').replace(/[^\p{L}\p{N} _.-]/gu, '').trim().slice(0, 14) || 'Gezgin';
+}
+
+function mpRoomCode(input) {
+  return String(input || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+}
+
+function renderLobby() {
+  const body = document.getElementById('mp-body');
+  if (!body) return;
+  const peers = Array.from(MP.peers.values());
+  const list = [`
+    <div class="mp-person"><i>${(G.hero.name || 'Sen').slice(0, 1)}</i>Sen (sen)<span class="tag">fener bekçisi</span></div>`,
+    ...peers.map((p) => `<div class="mp-person"><i>${p.name.slice(0, 1)}</i>${p.name}<span class="tag">${p.zone || 'bahçede'}</span></div>`)
+  ].join('');
+
+  if (!MP.connected) {
+    body.innerHTML = `
+      <div class="mp-row">
+        <label class="mp-field">Adın
+          <input id="mp-name" maxlength="14" value="${MP.name || ''}" placeholder="Gezgin">
+        </label>
+        <label class="mp-field">Oda kodu
+          <input id="mp-room" maxlength="8" value="${MP.room || ''}" placeholder="AYISIGI">
+        </label>
+      </div>
+      <div class="mp-row">
+        <button class="mp-btn" id="mp-join">Odaya gir</button>
+        <button class="mp-btn ghost" id="mp-create">Rastgele oda aç</button>
+      </div>
+      <p class="mp-note">Aynı cihazda: iki sekmede de aynı oda kodunu gir. İnternet üzerinden: kendi WebSocket aktarıcını çalıştırıp adresini aşağıya yaz.</p>
+      <label class="mp-field">Aktarıcı adresi (isteğe bağlı)
+        <input id="mp-relay" placeholder="wss://ornek.com/oda" value="${MP.relayUrl || ''}">
+      </label>
+    `;
+    document.getElementById('mp-join').addEventListener('click', () => {
+      const name = mpSafeName(document.getElementById('mp-name').value);
+      const room = mpRoomCode(document.getElementById('mp-room').value);
+      const relay = document.getElementById('mp-relay').value.trim();
+      if (!room) {
+        showToast('Bir oda kodu yaz (ör. AYISIGI).');
+        return;
+      }
+      joinRoom(name, room, relay);
+    });
+    document.getElementById('mp-create').addEventListener('click', () => {
+      const name = mpSafeName(document.getElementById('mp-name').value);
+      const code = Array.from({ length: 6 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[randInt(0, 31)]).join('');
+      const input = document.getElementById('mp-room');
+      if (input) input.value = code;
+      const relay = document.getElementById('mp-relay').value.trim();
+      joinRoom(name, code, relay);
+    });
+    return;
+  }
+
+  body.innerHTML = `
+    <p class="mp-code">Oda kodu: ${MP.room} · ${MP.mode === 'relay' ? 'internet' : 'aynı cihaz'}</p>
+    <div class="mp-row">
+      <button class="mp-btn ghost" id="mp-copy">Kodu/fişi kopyala</button>
+      <button class="mp-btn ghost" id="mp-leave">Odadan çık</button>
+    </div>
+    <div class="mp-list">${list}</div>
+    <div class="mp-chat" id="mp-chat">${MP.chat.map(mpChatLine).join('')}</div>
+    <div class="mp-emoji">
+      ${['Merhaba!', 'Yardım edin!', 'İyi dövüştün', 'Takip et', 'Dur!'].map((t) => `<button data-say="${t}">${t}</button>`).join('')}
+      ${[['👋'], ['✦'], ['🔥'], ['🌙'], ['🫶']].map(([e]) => `<button data-emoji="${e}">${e}</button>`).join('')}
+    </div>
+    <div class="mp-row">
+      <input class="mp-field" id="mp-text" style="flex:1;padding:.5rem .6rem;font-size:.85rem;background:rgba(255,255,255,.045);border:1px solid rgba(233,207,155,.2);border-radius:5px;color:var(--ink)" maxlength="120" placeholder="Bir şey yaz…">
+      <button class="mp-btn" id="mp-send">Gönder</button>
+    </div>
+    <p class="mp-note">Ortak savaş açıkken başlattığın düellolar arkadaşlarınla paylaşılır; düşman canı ikinizin vuruşlarıyla azalır.</p>
+  `;
+  const chat = document.getElementById('mp-chat');
+  if (chat) chat.scrollTop = chat.scrollHeight;
+  document.getElementById('mp-leave').addEventListener('click', leaveRoom);
+  document.getElementById('mp-copy').addEventListener('click', () => {
+    const text = `Gece Bahçesi · Ortak Yol\nOda: ${MP.room}${MP.mode === 'relay' ? '\nAktarıcı: ' + MP.relayUrl : ' (aynı cihaz)'}`;
+    mpCopy(text);
+  });
+  const send = () => {
+    const field = document.getElementById('mp-text');
+    if (!field) return;
+    const text = field.value.trim().slice(0, 120);
+    if (!text) return;
+    field.value = '';
+    sendChat(text);
+  };
+  document.getElementById('mp-send').addEventListener('click', send);
+  const field = document.getElementById('mp-text');
+  if (field) field.addEventListener('keydown', (event) => { if (event.key === 'Enter') send(); });
+  body.querySelectorAll('[data-say]').forEach((btn) => {
+    btn.addEventListener('click', () => sendChat(btn.dataset.say));
+  });
+  body.querySelectorAll('[data-emoji]').forEach((btn) => {
+    btn.addEventListener('click', () => sendChat(btn.dataset.emoji));
+  });
+}
+
+function mpChatLine(entry) {
+  if (entry.sys) return `<p class="sys">${entry.text}</p>`;
+  return `<p><b>${entry.name}</b> ${entry.text}</p>`;
+}
+
+function mpCopy(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => showToast('Kopyalandı ✦'), () => showToast(MP.room));
+  } else {
+    showToast('Oda: ' + MP.room);
+  }
+}
+
+function openLobby() {
+  injectMpUI();
+  MP.open = true;
+  MP.unread = 0;
+  const modal = document.getElementById('mp-modal');
+  if (modal) modal.hidden = false;
+  renderLobby();
+  updateMpFab();
+}
+
+function closeLobby() {
+  MP.open = false;
+  const modal = document.getElementById('mp-modal');
+  if (modal) modal.hidden = true;
+}
+
+function updateMpFab() {
+  const fab = document.getElementById('mp-fab');
+  if (!fab) return;
+  fab.classList.toggle('ing', MP.connected);
+  const count = document.getElementById('mp-fab-count');
+  if (count) count.textContent = MP.connected ? `· ${MP.peers.size + 1}` : '';
+  const text = document.getElementById('mp-fab-text');
+  if (text) text.textContent = MP.connected ? (MP.unread ? `Sohbet (${MP.unread})` : 'Ortak Yol') : 'Ortak Yol';
+  fab.hidden = !(G.scene === 'world');
+}
+
+/* ------------------------------------------------------------ taşıyıcılar */
+function joinRoom(name, room, relayUrl) {
+  leaveRoom(true);
+  MP.name = name;
+  MP.room = room;
+  MP.relayUrl = relayUrl || '';
+  MP.chat = [{ sys: true, text: `${name} olarak odaya girdin. Kodu arkadaşına ver.` }];
+  MP.mode = relayUrl ? 'relay' : 'local';
+  try { localStorage.setItem('gb-mp-name', name); } catch (error) { /* yoksay */ }
+  if (MP.mode === 'relay') {
+    try {
+      const socket = new WebSocket(relayUrl);
+      MP.socket = socket;
+      socket.addEventListener('open', () => {
+        MP.connected = true;
+        mpSend({ t: 'join', room: MP.room, name: MP.name });
+        mpPushChat({ sys: true, text: 'Sunucuya bağlandın.' });
+        renderLobby();
+        updateMpFab();
+      });
+      socket.addEventListener('message', (event) => {
+        let data = null;
+        try { data = JSON.parse(event.data); } catch (error) { return; }
+        if (!data) return;
+        if (data.t === 'room') {
+          if (typeof data.room === 'string' && data.room !== MP.room) {
+            mpPushChat({ sys: true, text: `Sunucu seni odaya taşıdı: ${data.room}` });
+            MP.room = data.room;
+            renderLobby();
+          }
+          return;
+        }
+        if (data.t === 'presence' && Array.isArray(data.peers)) {
+          mpApplyPresence(data.peers);
+          return;
+        }
+        mpReceive(data);
+      });
+      socket.addEventListener('close', () => {
+        MP.connected = false;
+        MP.peers.clear();
+        mpPushChat({ sys: true, text: 'Bağlantı kapandı.' });
+        renderLobby();
+        updateMpFab();
+      });
+      socket.addEventListener('error', () => {
+        mpPushChat({ sys: true, text: 'Sunucuya ulaşılamadı; aynı cihaz moduna düşüldü.' });
+      });
+    } catch (error) {
+      MP.mode = 'local';
+    }
+  }
+  if (MP.mode === 'local') {
+    try {
+      MP.channel = new BroadcastChannel('gece-bahcesi-' + MP.room);
+      MP.channel.onmessage = (event) => mpReceive(event.data);
+      MP.connected = true;
+      mpPushChat({ sys: true, text: 'Bu cihazda dinliyorsun. İkinci bir sekmede aynı oda kodunu gir.' });
+    } catch (error) {
+      mpPushChat({ sys: true, text: 'Bu tarayıcı sekmeler arası bağlantıyı desteklemiyor.' });
+    }
+  }
+  renderLobby();
+  updateMpFab();
+  mpSend({ t: 'hello', name: MP.name, zone: G.zoneName });
+}
+
+function leaveRoom(silent) {
+  if (MP.channel) {
+    try { MP.channel.close(); } catch (error) { /* yoksay */ }
+    MP.channel = null;
+  }
+  if (MP.socket) {
+    try { MP.socket.close(); } catch (error) { /* yoksay */ }
+    MP.socket = null;
+  }
+  MP.connected = false;
+  MP.peers.clear();
+  if (!silent) {
+    mpPushChat({ sys: true, text: 'Odadan ayrıldın.' });
+    renderLobby();
+    updateMpFab();
+  }
+}
+
+function mpSend(payload) {
+  const data = Object.assign({ from: MP.id, name: MP.name, room: MP.room, t: 'state' }, payload, { at: performance.now() });
+  if (MP.channel) {
+    try { MP.channel.postMessage(data); } catch (error) { /* yoksay */ }
+  }
+  if (MP.socket && MP.socket.readyState === 1) {
+    try { MP.socket.send(JSON.stringify(data)); } catch (error) { /* yoksay */ }
+  }
+}
+
+function mpApplyPresence(peers) {
+  const seen = new Set();
+  peers.forEach((peer) => {
+    if (!peer || peer.from === MP.id) return;
+    seen.add(peer.from);
+    MP.peers.set(peer.from, Object.assign({ name: 'Gezgin' }, MP.peers.get(peer.from) || {}, peer, {
+      name: mpSafeName(peer.name), at: Date.now()
+    }));
+  });
+  Array.from(MP.peers.keys()).forEach((id) => { if (!seen.has(id)) MP.peers.delete(id); });
+  renderLobby();
+  updateMpFab();
+}
+
+function mpPushChat(entry) {
+  MP.chat.push(Object.assign({ at: Date.now() }, entry));
+  if (MP.chat.length > 60) MP.chat.splice(0, MP.chat.length - 60);
+  const chat = document.getElementById('mp-chat');
+  if (chat) {
+    const nearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 40;
+    chat.innerHTML = MP.chat.map(mpChatLine).join('');
+    if (nearBottom) chat.scrollTop = chat.scrollHeight;
+  } else if (entry.text) {
+    MP.unread += 1;
+    updateMpFab();
+  }
+}
+
+function sendChat(text) {
+  const entry = { from: MP.id, name: mpSafeName(MP.name), text: String(text).slice(0, 120), at: Date.now() };
+  mpPushChat(entry);
+  mpSend({ t: 'chat', text: entry.text });
+  showBubble(entry);
+}
+
+function mpReceive(data) {
+  if (!data || data.room !== MP.room || data.from === MP.id) return;
+  if (data.t === 'chat') {
+    const entry = { from: data.from, name: mpSafeName(data.name), text: String(data.text || '').slice(0, 120), at: Date.now() };
+    mpPushChat(entry);
+    showBubble(entry);
+    return;
+  }
+  if (data.t === 'hello' || data.t === 'bye') {
+    if (data.t === 'bye') {
+      MP.peers.delete(data.from);
+      mpPushChat({ sys: true, text: `${mpSafeName(data.name)} odadan ayrıldı.` });
+    }
+    renderLobby();
+    updateMpFab();
+    return;
+  }
+  if (data.t === 'state') {
+    if (data.hearts !== undefined) {
+      const peer = { name: mpSafeName(data.name), x: data.x, y: data.y, dir: data.dir, moving: data.moving, zone: data.zone, battle: data.battle, hearts: data.hearts, level: data.level, at: Date.now() };
+      const had = MP.peers.has(data.from);
+      MP.peers.set(data.from, peer);
+      if (!had) {
+        mpPushChat({ sys: true, text: `${peer.name} odaya katıldı.` });
+        renderLobby();
+        updateMpFab();
+      }
+    }
+    return;
+  }
+  if (data.t === 'invite') {
+    mpHandleInvite(data);
+    return;
+  }
+  if (data.t === 'hit') {
+    mpHandlePeerHit(data);
+    return;
+  }
+  if (data.t === 'revive') {
+    mpHandleRevive(data);
+  }
+}
+
+/* --------------------------------------------------------------- varlıklar */
+function updateMultiplayer(dt) {
+  if (!MP.connected) return;
+  // sohbet balonlarını yaşlandır (durum gönderimi ayrı zamanlayıcıda)
+  (MP.bubbles || []).forEach((bubble) => { bubble.age += dt; });
+  MP.bubbles = (MP.bubbles || []).filter((bubble) => bubble.age < 4.2);
+}
+
+function mpSync() {
+  if (!MP.connected) return;
+  const now = performance.now();
+  if (now - (MP.lastSend || 0) > 110) {
+    MP.lastSend = now;
+    mpSend({
+      t: 'state',
+      x: Math.round(G.player.x),
+      y: Math.round(G.player.y),
+      dir: G.player.dir,
+      moving: G.player.moving,
+      zone: G.zoneName,
+      hearts: Math.round(G.hero.hp),
+      level: G.hero.level,
+      battle: Battle.active && Battle.enemy ? Battle.enemy.id : null
+    });
+  }
+  const cutoff = Date.now() - 12000;
+  let changed = false;
+  MP.peers.forEach((peer, id) => {
+    if (peer.at < cutoff) {
+      MP.peers.delete(id);
+      changed = true;
+    }
+  });
+  if (changed) {
+    renderLobby();
+    updateMpFab();
+  }
+}
+
+function drawMultiplayerFigures(camX, camY) {
+  if (!MP.connected || !MP.peers.size) return;
+  for (const peer of MP.peers.values()) {
+    if (typeof peer.x !== 'number') continue;
+    const px = peer.x - camX;
+    const py = peer.y - camY;
+    if (px < -120 || px > VIEW.w + 120 || py < -120 || py > VIEW.h + 120) continue;
+    drawHeroFigure(px, py, {
+      dir: peer.dir || 1,
+      walk: G.time * 3,
+      moving: !!peer.moving,
+      lantern: true,
+      time: G.time
+    });
+    ctx.save();
+    ctx.font = '500 11px "Iowan Old Style", Palatino, Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(159, 230, 164, 0.92)';
+    ctx.shadowColor = 'rgba(0,0,0,0.75)';
+    ctx.shadowBlur = 6;
+    ctx.fillText(peer.name, px, py - 66);
+    ctx.restore();
+  }
+  (MP.bubbles || []).forEach((bubble) => {
+    const peer = MP.peers.get(bubble.from);
+    if (!peer) return;
+    const alpha = clamp(4.2 - bubble.age, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, alpha * 1.6);
+    ctx.font = '500 12px var(--sans), system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    const w = Math.min(210, ctx.measureText(bubble.text).width + 18);
+    const x = peer.x - camX;
+    const y = peer.y - camY - 84 - bubble.age * 8;
+    ctx.fillStyle = 'rgba(6, 16, 18, 0.86)';
+    ctx.strokeStyle = 'rgba(233, 207, 155, 0.3)';
+    ctx.lineWidth = 1;
+    if (ctx.roundRect) {
+      ctx.beginPath();
+      ctx.roundRect(x - w / 2, y - 16, w, 24, 12);
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.fillRect(x - w / 2, y - 16, w, 24);
+    }
+    ctx.fillStyle = '#f0e6cf';
+    ctx.fillText(bubble.text, x, y + 1);
+    ctx.restore();
+  });
+}
+
+function showBubble(entry) {
+  MP.bubbles = MP.bubbles || [];
+  MP.bubbles.push({ from: entry.from, text: entry.text, age: 0 });
+  if (MP.bubbles.length > 6) MP.bubbles.shift();
+}
+
+/* ------------------------------------------------------------ ortak savaş */
+function mpBattleInfo() {
+  if (!Battle.active || !Battle.enemy) return null;
+  return { t: 'invite', enemy: Battle.enemy.id, hp: Math.round(Battle.enemy.hp), maxHp: Battle.enemy.maxHp, round: Battle.round };
+}
+
+const mpOriginalBegin = Battle.begin.bind(Battle);
+Battle.begin = function patchedBegin(enemyId, opts = {}) {
+  mpOriginalBegin(enemyId, opts);
+  if (MP.connected && MP.shareBattle) {
+    mpSend(Object.assign(mpBattleInfo() || {}, { t: 'invite' }));
+  }
+  mpRenderBattlePeers();
+};
+
+const mpOriginalHit = Battle.hitEnemy.bind(Battle);
+Battle.hitEnemy = function patchedHit(dmg, crit) {
+  mpOriginalHit(dmg, crit);
+  if (MP.connected && this.enemy) {
+    mpSend({ t: 'hit', enemy: this.enemy.id, hp: Math.round(this.enemy.hp), dmg, by: MP.name });
+  }
+};
+
+const mpOriginalClose = Battle.close.bind(Battle);
+Battle.close = function patchedClose(result) {
+  if (MP.connected && result === 'win') {
+    mpSend({ t: 'bye', ending: true, enemy: this.enemy ? this.enemy.id : null });
+  }
+  mpOriginalClose(result);
+  mpRenderBattlePeers();
+};
+
+function mpHandleInvite(data) {
+  if (!Battle.active) {
+    mpPushChat({ sys: true, text: `${mpSafeName(data.name)} bir düello başlattı: ${(ENEMIES[data.enemy] || {}).name || data.enemy}.` });
+    const fab = document.getElementById('mp-fab');
+    if (fab) fab.classList.add('ing');
+    return;
+  }
+  if (!MP.shareBattle || !Battle.enemy || data.enemy !== Battle.enemy.id) return;
+  Battle.setLog(`<b>${mpSafeName(data.name)}</b> de aynı düşmana karşı savaşıyor. Vuruşlarınız birleşiyor!`);
+  Sound.sfx('spark');
+  Battle.updateHUD();
+  mpRenderBattlePeers();
+}
+
+function mpHandlePeerHit(data) {
+  if (!Battle.active || !Battle.enemy || data.enemy !== Battle.enemy.id) return;
+  const peer = MP.peers.get(data.from);
+  if (peer) peer.battle = data.enemy;
+  Battle.setLog(`<b>${mpSafeName(data.name)}</b> aynı düşmana ${data.dmg} hasar verdi.`);
+  Battle.updateHUD();
+  mpRenderBattlePeers();
+}
+
+function mpRenderBattlePeers() {
+  const panel = document.querySelector('.battle-main');
+  if (!panel) return;
+  let box = document.getElementById('mp-battle-peers');
+  if (!MP.connected || !Battle.active) {
+    if (box) box.remove();
+    return;
+  }
+  const peers = Array.from(MP.peers.values()).filter((p) => p.battle && Battle.enemy && p.battle === Battle.enemy.id);
+  if (!peers.length) {
+    if (box) box.remove();
+    return;
+  }
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'mp-battle-peers';
+    box.className = 'mp-battle-peers';
+    panel.appendChild(box);
+  }
+  box.innerHTML = peers
+    .map((p) => `<span><i>${p.name.slice(0, 1)}</i>${p.name} · ${p.hearts !== undefined ? Math.max(0, p.hearts) + ' can' : 'savaşta'}</span>`)
+    .join('');
+}
+
+function mpHandleRevive(data) {
+  if (G.scene !== 'gameover') return;
+  const peer = MP.peers.get(data.from);
+  showToast(`${peer ? peer.name : 'Bir gezgin'} fenerini sana uzattı ✦`);
+  revive();
+}
+
+/* -------------------------------------------------------------- yardımcı */
+function mpStatusLine() {
+  if (!MP.connected) return '';
+  const names = Array.from(MP.peers.values()).map((p) => p.name);
+  return names.length ? `Ortak yol: ${names.join(', ')}` : 'Ortak yolda yalnızsın; kodu paylaş.';
+}
+/* Hikâye genişletmesi: bölümler */
+const CHAPTERS = [
+  { id: 'ch1', title: 'I. Sönen Ay', flag: () => !!G.flags.metNine, lines: [
+    'Ay gökyüzünden silinmişti. Bahçe kendi ışığını yitirmiş, yapraklar bile fısıldamayı bırakmıştı.',
+    'Kıvılcım adında bir ateşböceği fenerine sığındı ve üç ay parçasından söz etti.',
+    'Yosun Terası’nda Nine Mor bekliyordu; otların dilinden anlayan yaşlı bir kadın.'
+  ] },
+  { id: 'ch2', title: 'II. Üç Çiçek', flag: () => (G.flags.flowers || 0) >= 3, lines: [
+    'Ay çiçekleri gecenin içinde küçük yıldızlar gibi parlıyordu; her biri avucunda ılık bir alev gibi durdu.',
+    'Nine Mor çiçekleri aldı, kemikleri ısındı ve ilk parçayı avucuna bıraktı: “Işığı taşıyan, ışığa sahip olur.”'
+  ] },
+  { id: 'ch3', title: 'III. Küllerin Kralı', flag: () => !!G.flags.ratKing, lines: [
+    'Kül Korusu’nda taç takan bir sıçan vardı; sakladığı parçayı bırakmadı.',
+    'Onu dağıttığında küllerin arasından ikinci parça yükseldi. Krallığı bir avuç kül kadardı.'
+  ] },
+  { id: 'ch4', title: 'IV. Söğüdün Şarkısı', flag: () => !!G.flags.willowBoss, lines: [
+    'Nergis lavtasını kucağına aldı: “Ay düşerse suya, söğüt tutar ışığı…”',
+    'Söğüt uyandığında önce seni sardı, sonra kalbini açtı. Üçüncü parça oradaydı.'
+  ] },
+  { id: 'ch5', title: 'V. Kül Prensi', flag: () => !!G.flags.finished, lines: [
+    'Tapınağın kapısı açıldığında içeriden kül kokusu geldi: bir taht, bir gölge, bir kılıç.',
+    'Kül Prensi ışıktan korkuyordu; çünkü ışık ona neyi kaybettiğini hatırlatıyordu.',
+    'Fenerin söndüğü yerde ay doğdu. Bahçe nefes aldı.'
+  ] },
+  { id: 'ch6', title: 'VI. Sonsöz — Kuyu', flag: () => !!G.flags.epilogue, lines: [
+    'Şafaktan sonra bahçe tam uyanmadı; bir köşesi hâlâ karanlıktı.',
+    'Dedem Kül ay havuzunun kıyısında oturuyordu: yanmayan bir fener ve yıllanmış bir hüzün.',
+    '“Prens gitti, evet. Ama onu besleyen kuyu hâlâ orada. Üç düğüm çözülmeden şafak gerçek olmaz.”'
+  ] },
+  { id: 'ch7', title: 'VII. Yanık Yankı', flag: () => !!G.flags.echoDone, lines: [
+    'Kuyunun dibinde bir yankı vardı; senin sesini kullanıp kendi adını haykırıyordu.',
+    'Onu dağıttığında sustu. Bahçe, ilk kez kendi sessizliğini seçti.'
+  ] },
+  { id: 'ch8', title: 'VIII. Gerçek Şafak', flag: () => !!G.flags.trueDawn, lines: [
+    'Dedem Kül fenerini sana uzattı: “Artık yanabilir. Çünkü taşıyacak biri var.”',
+    'Ay havuzu ışıdı, söğüt şarkısını bitirdi, Nine Mor gülümsedi. Şafak, bu kez gerçekten geldi.'
+  ] }
+];
+/* Sonsöz bölümü: Dedem Kül, üç düğüm, Yankı */
+const EPI = {
+  elder: { kind: 'elder', x: 1465, y: 1015, id: 'elder' },
+  knots: [
+    { id: 'knot0', x: 420, y: 1180, seed: 1.2 },
+    { id: 'knot1', x: 2900, y: 1620, seed: 2.6 },
+    { id: 'knot2', x: 2240, y: 1990, seed: 4.1 }
+  ]
+};
+
+function epilogueOn() {
+  return !!G.flags.epilogue;
+}
+
+function knotsFound() {
+  return EPI.knots.filter((knot) => G.flags[knot.id]).length;
+}
+
+function buildEpilogue() {
+  if (!epilogueOn()) return;
+  const elder = EPI.elder;
+  world.npcs.push(elder);
+  addCollider(elder.x, elder.y - 6, 18);
+  world.interactables.push({
+    kind: 'npc',
+    target: elder,
+    x: elder.x,
+    y: elder.y,
+    r: 82,
+    label: () => 'Dedem Kül ile konuş',
+    action: () => talkElder()
+  });
+  world.drawables.push({ sortY: elder.y, npc: elder });
+  EPI.knots.forEach((knot) => {
+    const lantern = placeProp('lantern', knot.x, knot.y + 26, { scale: 0.8, tint: 'ash' });
+    lantern.sortY = knot.y + 26;
+    world.drawables.push({ sortY: lantern.sortY, prop: lantern });
+    world.interactables.push({
+      kind: 'knot',
+      knot,
+      x: knot.x,
+      y: knot.y,
+      r: 62,
+      label: () => (G.flags[knot.id] ? 'Çözülmüş düğüm' : 'Kül düğümünü çöz'),
+      action: () => touchKnot(knot),
+      visible: () => true
+    });
+  });
+  // sonsözde tapınak kapısı artık kuyunun ağzıdır
+  const gate = world.interactables.find((inter) => inter.kind === 'gate');
+  if (gate && !G.flags.echoDone) {
+    gate.echo = true;
+    gate.label = () => (G.flags.templeOpen ? 'Kuyuya bak' : 'Kapı mühürlü');
+    gate.action = () => interactEcho();
+  }
+}
+
+function drawElder(npc, camX, camY, time) {
+  const x = npc.x - camX;
+  const y = npc.y - camY;
+  const bob = Math.sin(time * 1.2) * 1.2;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = 'rgba(2, 8, 8, 0.4)';
+  ctx.beginPath();
+  ctx.ellipse(0, 1, 15, 5, 0, 0, TAU);
+  ctx.fill();
+  // baston
+  ctx.strokeStyle = '#6b5535';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(15, 2);
+  ctx.quadraticCurveTo(13, -26, 18, -40);
+  ctx.stroke();
+  // cübbe
+  const robe = ctx.createLinearGradient(0, -40, 0, 2);
+  robe.addColorStop(0, '#4a4438');
+  robe.addColorStop(1, '#1c1a17');
+  ctx.fillStyle = robe;
+  ctx.beginPath();
+  ctx.moveTo(-11, -38 + bob);
+  ctx.quadraticCurveTo(-15, -14 + bob, -13, 2);
+  ctx.lineTo(13, 2);
+  ctx.quadraticCurveTo(15, -16 + bob, 10, -38 + bob);
+  ctx.closePath();
+  ctx.fill();
+  // kapüşon
+  ctx.fillStyle = '#2a2620';
+  ctx.beginPath();
+  ctx.arc(0, -42 + bob, 9.5, Math.PI * 0.9, Math.PI * 2.1);
+  ctx.fill();
+  ctx.fillStyle = '#cdb995';
+  ctx.beginPath();
+  ctx.arc(0, -39 + bob, 5.6, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(20, 16, 14, 0.9)';
+  ctx.beginPath();
+  ctx.arc(2.4, -39.6 + bob, 0.9, 0, TAU);
+  ctx.fill();
+  // yanmayan fener
+  ctx.fillStyle = 'rgba(40, 40, 36, 0.95)';
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(-24, -20 + bob, 9, 11, 2) : ctx.rect(-24, -20 + bob, 9, 11);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(233, 207, 155, 0.4)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  drawGlow('#9fb2ab', -19.5, -14 + bob, 26, 0.12);
+  ctx.restore();
+}
+
+function drawKnot(knot, camX, camY, time) {
+  const x = knot.x - camX;
+  const y = knot.y - camY;
+  if (G.flags[knot.id]) return;
+  const pulse = 0.7 + Math.sin(time * 1.9 + knot.seed) * 0.25;
+  ctx.save();
+  ctx.strokeStyle = `rgba(180, 140, 110, ${0.5 + pulse * 0.3})`;
+  ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  for (let i = 0; i <= 40; i += 1) {
+    const t = i / 40;
+    const ang = t * TAU * 1.6 + knot.seed;
+    const r = 9 + Math.sin(t * 9 + knot.seed) * 4;
+    const px = x + Math.cos(ang) * r;
+    const py = y - 18 + Math.sin(ang) * r * 0.7;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+  drawGlow('#d9a06a', x, y - 18, 44 * pulse, 0.26);
+  ctx.restore();
+}
+
+function touchKnot(knot) {
+  if (G.flags[knot.id]) return;
+  G.flags[knot.id] = true;
+  const found = knotsFound();
+  Sound.sfx('shard');
+  showToast(`Kül düğümü çözüldü (${found}/3) ✦`);
+  Dlg.start([
+    say('you', 'Kül parmaklarının arasında dağılıyor. Düğüm çözüldüğünde bahçe bir an nefes alıyor.'),
+    say('spark', found < 3 ? `Daha ${3 - found} düğüm var. Fenerlere bak; kül, ışığın gölgesine saklanır.` : 'Üçü de çözüldü! Dedem Kül’e dön.')
+  ]);
+  updateHUD();
+  saveGame(true);
+}
+ENEMIES.echo = {
+  id: 'echo',
+  name: 'Yanık Yankı',
+  art: 'ghost',
+  level: 9,
+  hp: 520,
+  atk: 27,
+  def: 10,
+  spd: 13,
+  weak: 'light',
+  xp: 220,
+  stones: 80,
+  scale: 1.9,
+  boss: true,
+  moves: [
+    { name: 'Yankılanan Vuruş', power: 1.25, weight: 3 },
+    { name: 'Kendi Sesin', power: 1.4, weaken: 2, weight: 2 },
+    { name: 'Boşluk Fısıltısı', power: 0.9, poison: 0.6, weight: 2 },
+    { name: 'Sessizlik', power: 0.5, heal: 40, weight: 1 }
+  ]
+};
+
+function talkElder() {
+  const knots = knotsFound();
+  if (G.flags.echoDone) {
+    Dlg.start([
+      say('elder', 'Yankı sustu. Kuyu artık bir kuyu; içine bakınca yalnızca kendi yüzünü görüyorsun.'),
+      say('elder', 'Al şu feneri. Yanmayı hak ediyorsun.', {
+        choices: [
+          {
+            label: 'Feneri al',
+            act: () => {
+              if (G.flags.trueDawn) return;
+              G.flags.trueDawn = true;
+              G.hero.maxLight += 10;
+              G.hero.light = G.hero.maxLight;
+              Sound.sfx('win');
+              saveGame(true);
+              updateHUD();
+              setTimeout(() => showEnding(true), 400);
+            },
+            next: []
+          },
+          { label: 'Biraz daha kal', next: () => [{ ...say('elder', 'Şafak acele etmez, bekçi. Sen de etme.') }] }
+        ]
+      })
+    ]);
+    return;
+  }
+  if (knots < 3) {
+    Dlg.start([
+      say('elder', `Kuyu ${knots}/3 düğümle bağlı. Her düğüm, küllerin bir yalanını tutuyor.`),
+      say('elder', 'Batıda, doğuda ve güneyde fenerler bıraktım. Kül, ışığın gölgesine saklanır; oraya bak.'),
+      say('spark', 'Yürüyelim. Düğümler çözüldükçe fenerim daha rahat yanıyor.', {
+        choices: [
+          { label: 'Kıvılcım’a sor', next: () => [{ ...say('spark', 'Kül düğümleri karanlıkta değil, ışığın hemen yanında saklanır. Fenerlerin dibine bak.') }] },
+          ...(knots > 0 ? [] : [{ label: 'Kuyu nedir?', next: () => scriptElderLore() }])
+        ]
+      })
+    ]);
+    return;
+  }
+  Dlg.start([
+    say('elder', 'Üç düğüm de çözüldü. Kuyunun ağzı açıldı; şimdi içindeki sesi duyabiliyorum.'),
+    say('elder', 'O ses senin sesin, bekçi. Ama sana ait değil. İn ve onu geri al.'),
+    say('spark', 'Yankı, prensin bıraktığı boşluk. Hazır olduğunda kapıya git.', {
+      choices: [
+        {
+          label: 'Kuyuya in',
+          act: () => {
+            startBattle('echo', { bg: 'temple', intro: 'Yanık Yankı senin sesinle konuşuyor…' });
+          },
+          next: []
+        },
+        { label: 'Önce hazırlan', next: [] }
+      ]
+    })
+  ]);
+}
+
+function scriptElderLore() {
+  return [
+    say('elder', 'Prens bir zamanlar fener bekçisiydi. Ay söndüğünde kuyuya inen ilk kişi o oldu.'),
+    say('elder', 'Kuyu ondan ışığını aldı, yerine kül verdi. Sen de aynı kuyuya bakıyorsun, ama farklı bir şeyle: bir arkadaşla.'),
+    say('spark', 'Ben de buradayım, Dedem. Sadece bir ışık değilim artık.')
+  ];
+}
+function interactEcho() {
+  if (G.flags.echoDone) {
+    Dlg.start([say('you', 'Kuyunun ağzında ılık bir hava var. İçeride kimse yok — yalnızca senin nefesin.')]);
+    return;
+  }
+  if (!G.flags.templeOpen) {
+    Dlg.start([say('you', 'Kuyu taşlarla örtülü. Önce tapınağın kapısı açılmalı.')]);
+    return;
+  }
+  if (knotsFound() < 3) {
+    Dlg.start([
+      say('you', 'Kuyunun ağzı küllerle bağlı. Üç düğümden çözülmemiş olanlar direniyor.'),
+      say('spark', `Dedem Kül üç fener bıraktı. Şu an ${knotsFound()}/3 düğüm açık.`)
+    ]);
+    return;
+  }
+  Dlg.start([
+    say('you', 'Kuyunun ağzından kendi sesin yükseliyor: “Geri dön. Burada kimse seni beklemiyor.”'),
+    say('spark', 'Yalan söylüyor. Ama güçlü — hazır ol.'),
+    say('you', 'Feneri kaldırıyorsun.', {
+      choices: [
+        { label: 'Yankıyla savaş', act: () => startBattle('echo', { bg: 'temple', intro: 'Yanık Yankı kuyudan yükseliyor!' }), next: [] },
+        { label: 'Geri çekil', next: [] }
+      ]
+    })
+  ]);
+}
+
+/* --------------------------------------------------------------- kancalar */
+const _buildWorld = buildWorld;
+buildWorld = function patchedBuildWorld() {
+  _buildWorld();
+  buildEpilogue();
+};
+
+const _drawNpc = drawNpc;
+drawNpc = function patchedDrawNpc(npc, camX, camY, time) {
+  if (npc.kind === 'elder') {
+    drawElder(npc, camX, camY, time);
+    return;
+  }
+  _drawNpc(npc, camX, camY, time);
+};
+
+const _drawWorldFigures = drawWorldFigures;
+drawWorldFigures = function patchedDrawWorldFigures(camX, camY) {
+  _drawWorldFigures(camX, camY);
+  if (epilogueOn()) {
+    EPI.knots.forEach((knot) => drawKnot(knot, camX, camY, G.time));
+  }
+  drawMultiplayerFigures(camX, camY);
+};
+
+const _questText = questText;
+questText = function patchedQuestText() {
+  const f = G.flags;
+  if (f.trueDawn) return 'Gerçek şafak doğdu; fener artık senin.';
+  if (f.epilogue) {
+    if (f.echoDone) return 'Dedem Kül’ün fenerini al; şafağı tamamla.';
+    if (knotsFound() < 3) return `Kül düğümlerini çöz (${knotsFound()}/3).`;
+    return 'Kuyuya in ve Yanık Yankı’yı sustur.';
+  }
+  return _questText();
+};
+
+const _onBattleWin = onBattleWin;
+onBattleWin = function patchedOnBattleWin(enemyId) {
+  if (enemyId === 'echo') {
+    G.flags.echoDone = true;
+    G.hero.shards = 3;
+    Sound.sfx('shard');
+    showToast('Yankı sustu ✦');
+    Dlg.start([
+      say('you', 'Ses kesildi. Kuyunun dibinde yalnızca bir avuç ılık kül kaldı.'),
+      say('spark', 'Duyuyor musun? Bahçe sessiz — ama korkuyla değil, huzurla.'),
+      say('spark', 'Dedem Kül’e dön. Feneri sana verecek.')
+    ]);
+    saveGame(true);
+    updateHUD();
+    return;
+  }
+  _onBattleWin(enemyId);
+};
+/* Arayüz kancaları: hikâye sekmesi */
+MENU_TABS.push({ id: 'story', label: 'Hikâye' });
+
+const _renderMenu = renderMenu;
+renderMenu = function patchedRenderMenu() {
+  if (menuTab !== 'story') {
+    _renderMenu();
+    return;
+  }
+  el.menuTabs.innerHTML = '';
+  MENU_TABS.forEach((tab) => {
+    const button = document.createElement('button');
+    button.className = 'tab';
+    button.textContent = tab.label;
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-selected', String(tab.id === 'story'));
+    button.addEventListener('click', () => {
+      menuTab = tab.id;
+      Sound.sfx('select');
+      renderMenu();
+    });
+    el.menuTabs.appendChild(button);
+  });
+  let html = '<h3>Fener Bekçisinin Hikâyesi</h3>';
+  const shown = CHAPTERS.filter((chapter) => chapter.flag());
+  if (!shown.length) {
+    html += '<p class="prose">Henüz bir sayfa yazılmadı. Yola çık; hikâye yürürken oluşur.</p>';
+  }
+  shown.forEach((chapter) => {
+    html += `<div class="chapter"><p class="chapter-title">${chapter.title}</p>`;
+    chapter.lines.forEach((line) => {
+      html += `<p class="prose">${line}</p>`;
+    });
+    html += '</div>';
+  });
+  const next = CHAPTERS.find((chapter) => !chapter.flag());
+  if (next) html += `<p class="prose" style="opacity:.45">Sıradaki sayfa: ${next.title}</p>`;
+  if (MP.connected) html += `<h3>Ortak Yol</h3><p class="prose">${mpStatusLine()}</p>`;
+  el.menuBody.innerHTML = html;
+};
+/* Son, sonsöz ve döngü kancaları */
+const _showEnding = showEnding;
+showEnding = function patchedShowEnding(trueDawn) {
+  _showEnding();
+  const title = document.querySelector('.ending-title');
+  const poem = document.querySelector('.ending-poem');
+  if (trueDawn) {
+    if (title) title.textContent = 'Gerçek Şafak';
+    if (poem) {
+      poem.innerHTML = 'Kuyu sustu, yankı dindi.<br>Fener artık senin elinde yanıyor —<br>ve bahçe, ilk kez tamamen uyandı.';
+    }
+  } else {
+    if (title) title.textContent = 'Şafak';
+    if (poem) {
+      poem.innerHTML = 'Ay yeniden doğdu, bahçe nefes aldı.<br>Kül dağıldı; geriye yalnızca ışık kaldı.<br><em>Ama bir köşede bir kuyu hâlâ açık…</em>';
+    }
+  }
+  const stats = document.getElementById('ending-stats');
+  let box = document.getElementById('ending-branch');
+  if (box) box.remove();
+  if (!stats) return;
+  box = document.createElement('div');
+  box.id = 'ending-branch';
+  box.style.margin = '0 0 1.1rem';
+  if (trueDawn) {
+    box.innerHTML = '<p class="mp-note" style="text-align:center">Hikâyenin sonu. Oynadığın için teşekkürler ✦</p>';
+  } else {
+    const button = document.createElement('button');
+    button.className = 'btn btn-primary';
+    button.textContent = 'Sonsöz: Kül Kuyusu';
+    button.style.width = '100%';
+    button.addEventListener('click', () => startEpilogue());
+    box.appendChild(button);
+    const note = document.createElement('p');
+    note.className = 'mp-note';
+    note.style.marginTop = '.5rem';
+    note.style.textAlign = 'center';
+    note.textContent = 'Şafaktan sonra bahçede bir kuyu açık kaldı. Daha uzun bir yol ister misin?';
+    box.appendChild(note);
+  }
+  stats.parentNode.insertBefore(box, stats);
+};
+
+function startEpilogue() {
+  G.flags.epilogue = true;
+  G.flags.finished = true;
+  G.dawn = 0;
+  document.body.dataset.dawn = '0';
+  G.hero.hp = G.hero.maxHp;
+  G.hero.light = G.hero.maxLight;
+  el.ending.hidden = true;
+  G.scene = 'world';
+  buildWorld();
+  G.player.x = 1465;
+  G.player.y = 1180;
+  G.player.target = null;
+  G.camera.x = G.player.x - VIEW.w / 2;
+  G.camera.y = G.player.y - VIEW.h * 0.56;
+  setScene('world');
+  G.inputLocked = false;
+  computeCamera(0, true);
+  updateHUD();
+  saveGame(true);
+  Sound.sfx('open');
+  setTimeout(() => {
+    Dlg.start([
+      say('elder', 'Demek prensin külünü savurdun. Yüzünde hâlâ o ışık var.'),
+      say('elder', 'Ama bak: ay doğdu, güneş doğmadı. Çünkü kuyu hâlâ aç.'),
+      say('elder', 'Üç kül düğümü bıraktım bahçeye. Onları çöz; sonra kuyuya in.'),
+      say('spark', 'Ben de yanındayım. Bu kez yalnız değiliz — belki bir arkadaşımız da olur.', {
+        choices: [{ label: 'Düğümleri aramaya başla', act: () => showToast('Görev: 3 Kül Düğümü'), next: [] }]
+      })
+    ]);
+  }, 500);
+}
+
+const _setScene = setScene;
+setScene = function patchedSetScene(name) {
+  _setScene(name);
+  updateMpFab();
+};
+
+const _update = update;
+update = function patchedUpdate(dt) {
+  _update(dt);
+  updateMultiplayer(dt);
+  if (MP.connected && Battle.active && !MP.battleSent && Battle.enemy) {
+    MP.battleSent = true;
+    mpRenderBattlePeers();
+  }
+  if (!Battle.active) MP.battleSent = false;
+};
+
+function initMultiplayerUI() {
+  injectMpUI();
+  const style = document.createElement('style');
+  style.textContent = `
+    .chapter { margin: 0 0 1rem; padding: 0 0 0.35rem; border-bottom: 1px solid rgba(233,207,155,0.1); }
+    .chapter-title { margin: 0.2rem 0 0.35rem; font-family: var(--serif); font-size: 1.02rem; color: var(--gold); letter-spacing: 0.02em; }
+    .mp-battle-peers { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.45rem; }
+    .mp-battle-peers span { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.22rem 0.5rem; font-size: 0.66rem; letter-spacing: 0.04em; color: #cdeede; background: rgba(159,230,164,0.1); border: 1px solid rgba(159,230,164,0.28); border-radius: 999px; }
+    .mp-battle-peers i { font-style: normal; width: 1rem; height: 1rem; display: grid; place-items: center; border-radius: 50%; background: rgba(159,230,164,0.22); }
+  `;
+  document.head.appendChild(style);
+  const savedName = localStorage.getItem('gb-mp-name');
+  if (savedName) MP.name = savedName;
+  updateMpFab();
+  // arka plan sekmesinde de durum aksın
+  setInterval(mpSync, 140);
+}
+
+initMultiplayerUI();
+
 </script>
 </body>
 </html>

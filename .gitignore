@@ -1,5 +1,8 @@
-# yerel araçlar ve ekran görüntüleri
+# yerel araçlar, sunucu izleri ve ekran görüntüleri
 .tools/
 *.png
 server.log
 server.pid
+relay.log
+.relay.pid
+.srv.pid
